@@ -1,0 +1,48 @@
+Voici un résumé clair, professionnel et court à envoyer à l’équipe concernée :
+
+
+---
+
+✅ Résumé pour l’équipe – Point sur la restauration LVM
+
+Bonjour,
+
+Suite à nos analyses, il est important de préciser que :
+
+✔ La restauration LVM (vgcfgrestore) ne sauvegarde ni ne restaure les données applicatives.
+
+Elle ne restaure que la configuration LVM, c’est-à-dire :
+
+la liste des volumes logiques (LV),
+
+la structure du volume group (VG),
+
+les tailles et métadonnées des volumes.
+
+
+❌ Les données contenues sous /applis (PostgreSQL, logs, fichiers applicatifs, backups, etc.) ne sont pas sauvegardées par LVM.
+
+Ainsi :
+
+Si un LV est supprimé,
+
+ou si un filesystem est endommagé,
+
+ou si des fichiers sont effacés,
+
+
+➡️ LVM ne permet pas de récupérer ces données.
+➡️ Seules des sauvegardes applicatives ou filesystem sont utilisables pour restaurer du contenu.
+
+✔ LVM = configuration technique
+
+❌ LVM ≠ sauvegarde de données
+
+Merci de prendre en compte cette limitation lors de la gestion ou de la suppression des volumes sous /applis.
+
+
+---
+
+Si tu veux, je peux aussi préparer : ✅ un message plus formel pour management
+✅ une version plus technique pour équipes Linux
+✅ une version courte pour Teams/Slack
