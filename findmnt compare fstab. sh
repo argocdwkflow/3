@@ -1,0 +1,112 @@
+#!/bin/bash
+
+set -u  # mieux valider les variables non définies
+
+echo "Comparaison fstab vs montages réels"
+echo "-----------------------------------"
+
+FSTAB_FILE="/etc/fstab"
+
+# === 1) Liste des FS critiques à surveiller ===
+# À adapter pour ton contexte (ex : /var/cache/yum, /u01, /oracle, etc.)
+CRITICAL_MOUNTS=(
+    /var
+    /usr
+    /home
+    /var/cache/yum
+)
+
+# === 2) Construire des listes propres ===
+
+# Liste des points de montage déclarés dans fstab (lignes non commentées)
+mapfile -t fstab_mounts < <(awk '!/^#/ && NF>=2 {print $2}' "$FSTAB_FILE")
+
+# Liste des points de montage réellement montés
+mapfile -t mounted_mounts < <(findmnt -rn -o TARGET)
+
+# Convertir en "sets" via des tableaux associatifs pour tests rapides
+declare -A FSTAB_SET
+declare -A MOUNTED_SET
+
+for mp in "${fstab_mounts[@]}"; do
+    FSTAB_SET["$mp"]=1
+done
+
+for mp in "${mounted_mounts[@]}"; do
+    MOUNTED_SET["$mp"]=1
+done
+
+# === 3) Comparaison générale fstab vs montages ===
+
+echo
+echo "▶ Vérification générale fstab vs montages"
+echo "----------------------------------------"
+
+for fs in "${fstab_mounts[@]}"; do
+    if [[ -n "${MOUNTED_SET[$fs]:-}" ]]; then
+        echo "[OK ] $fs est monté et présent dans fstab"
+    else
+        echo "[KO ] $fs est présent dans fstab mais NON monté"
+    fi
+done
+
+# Optionnel : détecter les FS montés mais non déclarés dans fstab
+echo
+echo "▶ Points montés mais ABSENTS de /etc/fstab"
+echo "------------------------------------------"
+
+for fs in "${mounted_mounts[@]}"; do
+    if [[ -z "${FSTAB_SET[$fs]:-}" ]]; then
+        echo "[WARN] $fs est monté mais pas dans fstab (non persistant après reboot)"
+    fi
+done
+
+# === 4) Vérification spécifique des FS CRITIQUES ===
+
+echo
+echo "▶ Vérification des FS CRITIQUES"
+echo "-------------------------------"
+
+for crit in "${CRITICAL_MOUNTS[@]}"; do
+
+    in_fstab=0
+    commented_in_fstab=0
+    mounted=0
+
+    # Est-il monté ?
+    if [[ -n "${MOUNTED_SET[$crit]:-}" ]]; then
+        mounted=1
+    fi
+
+    # Est-il présent en ligne active dans fstab ?
+    if grep -Eq "^[[:space:]]*[^#].*[[:space:]]${crit}[[:space:]]" "$FSTAB_FILE"; then
+        in_fstab=1
+    # Est-il mentionné seulement dans une ligne commentée ?
+    elif grep -Eq "^[[:space:]]*#.*[[:space:]]${crit}[[:space:]]" "$FSTAB_FILE"; then
+        commented_in_fstab=1
+    fi
+
+    # Cas 1 : FS critique monté et bien déclaré
+    if (( mounted == 1 && in_fstab == 1 )); then
+        echo "[OK  ] $crit : monté et présent dans fstab"
+
+    # Cas 2 : FS critique monté mais pas dans fstab -> danger après reboot
+    elif (( mounted == 1 && in_fstab == 0 )); then
+        if (( commented_in_fstab == 1 )); then
+            echo "[CRIT] $crit : monté MAIS son entrée fstab a été COMMENTÉE (risque après reboot)"
+        else
+            echo "[CRIT] $crit : monté MAIS AUCUNE entrée fstab (ajouter dans /etc/fstab)"
+        fi
+
+    # Cas 3 : FS critique non monté
+    else
+        if (( in_fstab == 1 )); then
+            echo "[CRIT] $crit : présent dans fstab mais NON monté"
+        elif (( commented_in_fstab == 1 )); then
+            echo "[CRIT] $crit : NON monté et son entrée fstab est COMMENTÉE"
+        else
+            echo "[CRIT] $crit : NON monté et AUCUNE trace dans fstab"
+        fi
+    fi
+
+done
