@@ -1,0 +1,504 @@
+Voici l’analyse claire et expert Veritas VCS/InfoScale de ce que montrent tes captures.
+
+
+---
+
+✅ 1. Ce que montrent les logs à l’écran
+
+On voit plusieurs messages typiques VCS :
+
+🔹 “Resource became OFFLINE unexpectedly”
+
+Cela signifie :
+
+VCS surveillait la ressource (via le monitor)
+
+Une probe (monitor script) a détecté que la ressource n’était plus UP
+
+Le parent group peut être impacté selon la criticité
+
+
+Exemple probable dans ton log :
+(Monitor) resource <xxxx> became OFFLINE unexpectedly
+
+
+---
+
+🔹 “Clearing resource … completed”
+
+Ça veut dire que VCS a effectué une opération de clear automatique après une fault :
+
+Clear = réinitialiser le fault
+
+Pas un start
+
+
+
+---
+
+🔹 “agent framework (AFP) detected that resource has faulted”
+
+Le script d’agent (type Mount, IP, Oracle, NIC, DiskGroup etc.) :
+
+a détecté un return code != 110 / 100 / 0
+
+donc a marqué la ressource en FAULTED
+
+
+
+---
+
+🔹 “Unstable resources detected on system XXX”
+
+Cela signifie que :
+
+le group ou la ressource n’est pas dans un état stable
+
+soit OFFLINE/ONLINE partiel
+
+soit un partial state entre nodes (split-brain VCS non, mais désalignement)
+
+
+
+---
+
+✅ 2. Le problème principal ici
+
+Les logs montrent plusieurs ressources qui tombent OFFLINE sur 1 node, suivies de :
+
+clear automatique
+
+re-probe
+
+mais VCS ne tente pas un start (donc Either)
+
+resources flagged FAULTED
+
+
+Un node semble ne pas arriver à monitorer les ressources correctement.
+
+
+---
+
+🔥 3. Causes les plus probables (basé sur logs VCS)
+
+1️⃣ Resource offline unexpected → problème OS ou FS
+
+Exemples fréquents :
+
+Filesystem mounté mais inaccessible
+
+/etc/vx/.vcsmac ou directory inaccessible
+
+Process disparu
+
+Kernel I/O error (dm-xx, SAN, LUN)
+
+NIC flap → IPMonitor FAIL
+
+Oracle process tué
+
+
+📌 Vu que tu as souvent des problèmes I/O SAN (dm-36, dm-xx) → très probable que VCS détecte une probe timeout.
+
+
+---
+
+2️⃣ L’agent Framework (VxVM, Mount, IP) ne répond plus
+
+Typique en cas de :
+
+surcharge CPU
+
+LVM/VxVM “hang”
+
+systemd en mode freeze (tu en as parlé récemment)
+
+unhang kernel threads (D-state)
+
+
+
+---
+
+3️⃣ Heartbeat VCS OK → pas un split brain
+
+D’après le log, pas de :
+
+LLT WARNING GAB membership lost
+
+Donc cluster OK.
+
+
+---
+
+🎯 4. Les commandes à exécuter pour analyser (très important)
+
+1. Voir l’état cluster
+
+hastatus -sum
+
+2. Voir ressources en fault
+
+hares -state | grep -i FAULT
+
+3. Voir les lastprobes
+
+hastatus -display | grep -i last
+
+4. Logs détaillés
+
+/var/VRTSvcs/log/engine_A.log
+/var/VRTSvcs/log/A.log
+/var/VRTSvcs/log/agentname_A.log
+
+5. Vérifier la ressource elle-même
+
+Selon le type :
+
+hagrp -display <group>
+hares -display <resource>
+
+
+---
+
+🧠 5. L’analyse la plus probable
+
+👉 Le node a des problèmes d’I/O ou filesystem, causant :
+
+monitor timeout
+
+resource probe error
+
+resource → FAULTED
+
+VCS ne redémarre pas car “unexpected offline” (par design)
+
+VCS clear la ressource mais elle retombe
+
+
+Cela concorde avec tes problèmes récurrents de :
+
+/var/cache/yum
+
+dm-36 / SAN
+
+local-fs.target fail
+
+I/O error buffer
+
+LVM freeze
+
+
+💡 VCS n’est pas le problème – c’est le symptôme !
+
+Le problème est probablement OS / I/O / kernel / FS.
+
+
+---
+
+🚀 6. Ce que tu dois faire maintenant (en tant qu’expert N3)
+
+Étape 1 : Vérifier si les FS des ressources sont accessibles
+
+ls -l /apps /oracle /var/...
+
+Étape 2 : Vérifier les erreurs I/O ou kernel
+
+dmesg | grep -i error
+dmesg | grep -i dm-
+journalctl -xe | grep -i xfs
+
+Étape 3 : Vérifier si un agent est bloqué
+
+ps -ef | grep -i hatype
+
+Étape 4 : Clear manual
+
+hares -clear <resource> -sys <node>
+
+Étape 5 : If needed : switch node
+
+hagrp -switch <group> -to <othernode>
+
+
+---
+
+🏁 7. Si tu veux que je fasse un diagnostic complet
+
+Envoie-moi :
+
+✔ sortie de hastatus -sum
+✔ sortie de hares -state
+✔ sortie de dmesg | tail -200
+✔ engine_A.log (les 30 dernières lignes)
+
+Je t’analyse tout comme un expert Veritas InfoScale N3 et je te donne la root cause exact.
+
+
+---
+
+Si tu veux, je peux aussi te produire :
+
+🔥 un RCA complet
+
+🔥 un email propre pour l’équipe VCS / stockage / OS
+
+🔥 un plan de remédiation cluster
+
+
+Souhaites-tu une analyse RCA complète à envoyer à ton management / équipe ?
+
+
+Parce que, pour VCS, “FAULTED” = la ressource devait être ONLINE mais le monitor l’a trouvée OFFLINE (ou en erreur) de façon inattendue.
+
+Sur ton screenshot on lit (en le remettant à l’endroit) quelque chose du genre :
+
+Resource mfes_app is faulted on system s02r1v9…
+
+agent framework (AFP) because the resource became OFFLINE unexpectedly on its own
+
+VCS will not initiate failover of service group SG_PROD_MF_ROOM because the faulted resource is not critical and no critical parent resources need to be taken offline
+
+
+Donc la séquence est :
+
+1. Le service group SG_PROD_MF_ROOM pensait que mfes_app était ONLINE sur le node …13.
+
+
+2. Le script de monitor de l’agent (type Application, Mount, etc.) a fait un check.
+
+
+3. Ce check a retourné une erreur (process disparu, retour ≠ 0, timeout, filesystem inaccessible, etc.).
+
+
+4. VCS marque alors la ressource FAULTED sur ce node et écrit “became OFFLINE unexpectedly”.
+
+
+5. Comme mfes_app n’est pas marquée Critical, VCS n’initie pas de failover du SG complet (c’est ce qu’explique la phrase sur “not critical and no critical parent resources”).
+
+
+
+👉 Autrement dit :
+mfes_app a été arrêtée / a crashé / est devenue inaccessible au niveau OS sur le node xxxx13, alors que VCS la considérait ONLINE.
+Ce n’est pas VCS qui l’a arrêtée, VCS ne fait que constater l’état et la marquer en FAULTED.
+
+
+---
+
+Ce que tu peux vérifier concrètement sur le node xxxx13
+
+1. Type et config de la ressource :
+
+
+
+hares -display mfes_app
+
+(regarde Type, MonitorProgram, MonitorProcesses, Critical, RestartLimit…)
+
+2. Son état précis :
+
+
+
+hares -state mfes_app -sys xxxx13
+hastatus -sum | egrep "GROUP|mfes_app"
+
+3. Côté OS au moment du fault (même horodatage que dans le log VCS) :
+
+
+
+dmesg | tail -200
+journalctl -xe --since "YYYY-MM-DD HH:MM:SS" --until "YYYY-MM-DD HH:MM:SS"
+ps -ef | grep -i mfes
+
+Tu cherches :
+
+crash du process mfes_*
+
+kill manuel (SIGKILL)
+
+erreurs I/O sur les LUN (dm-xx), XFS, etc.
+(très probable vu tes buffer I/O error / dm-36 sur ce cluster)
+
+
+4. Après correction de la cause OS / appli :
+
+
+
+hares -clear mfes_app -sys xxxx13
+hagrp -online SG_PROD_MF_ROOM -sys xxxx13   # si tu veux le remettre ici
+
+Si tu m’envoies :
+
+hares -display mfes_app
+
+hastatus -sum
+
+les logs engine_A.log autour de cet événement
+je peux te faire une petite RCA complète ciblée pour ton équipe (OS / stockage / Veritas).
+
+
+Voici la méthode correcte, propre et 100% “VCS best-practice” pour arrêter et démarrer la ressource mfes_APP afin de tester son comportement sans impacter le cluster, de manière isolée et contrôlée.
+
+
+---
+
+✅ 1. Comprendre avant d’agir
+
+mfes_APP est une resource appartenant à un service group (SG) du cluster VCS.
+➡️ Tu NE dois jamais utiliser systemctl ou tuer les process manuellement
+➡️ Tu dois toujours utiliser les commandes VCS (hares / hagrp)
+
+Sinon :
+
+VCS croira que la ressource “devient OFFLINE unexpectedly”
+
+Elle passera en FAULTED
+
+Le Service Group peut partir en failover selon les attributs Critical et AutoFailover
+
+
+
+---
+
+✅ 2. Trouver le Service Group de la ressource
+
+Commande simple :
+
+hagrp -where mfes_APP
+
+ou
+
+hares -display mfes_APP | grep -i Group
+
+Exemple résultat :
+
+Group = SG_PROD_MF_ROOM
+
+
+---
+
+✅ 3. Arrêter proprement la ressource (VCS contrôle l’arrêt)
+
+Méthode officielle :
+
+hares -offline mfes_APP -sys <node>
+
+Exemple :
+
+hares -offline mfes_APP -sys s02r1v9xxx13
+
+💡 Ceci appelle le script de l’agent :
+
+StopProgram ou
+
+Stop entry point
+Il arrête proprement sans mettre la ressource en FAULTED.
+
+
+
+---
+
+📌 Vérifier l’état après l’arrêt
+
+hares -state mfes_APP -sys <node>
+
+Résultat attendu :
+
+OFFLINE
+
+
+---
+
+✅ 4. Démarrer proprement la ressource
+
+hares -online mfes_APP -sys <node>
+
+ou (équivalent)
+
+hagrp -online <Group> -sys <node>
+
+Exemple :
+
+hagrp -online SG_PROD_MF_ROOM -sys s02r1v9xxx13
+
+
+---
+
+📌 Vérifier que le monitor fonctionne
+
+hares -state mfes_APP -sys <node>
+hastatus -sum | grep mfes_APP
+
+La ressource doit passer :
+
+ONLINE|ONLINE
+
+
+---
+
+🔍 5. Tester le monitor (health check VCS)
+
+Pour valider le fonctionnement monitoring sans arrêter l’application, tu peux forcer un monitor :
+
+hares -probe mfes_APP -sys <node>
+
+Puis vérifier :
+
+hares -state mfes_APP
+
+
+---
+
+⚠️ 6. Si la ressource passe FAULTED pendant tes tests
+
+Clear :
+
+hares -clear mfes_APP -sys <node>
+
+Puis relancer :
+
+hares -online mfes_APP -sys <node>
+
+
+---
+
+🧠 7. Résumé des commandes (à garder dans ton runbook)
+
+▶️ Trouver le SG lié :
+
+hagrp -where mfes_APP
+
+▶️ Arrêter la ressource :
+
+hares -offline mfes_APP -sys <node>
+
+▶️ Démarrer la ressource :
+
+hares -online mfes_APP -sys <node>
+
+▶️ Prober (monitor test) :
+
+hares -probe mfes_APP -sys <node>
+
+▶️ Clear en cas de FAULTED :
+
+hares -clear mfes_APP -sys <node>
+
+▶️ Vérifier :
+
+hares -state mfes_APP -sys <node>
+hastatus -sum
+
+
+---
+
+🔥 Si tu veux, je peux aussi te préparer :
+
+un runbook PDF "VCS Resource Operations"
+
+un script vcs_resource_test.sh
+
+une procédure complète “Failover test MFES_APP”
+
+
+Veux-tu que je génère le runbook ?
