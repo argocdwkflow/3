@@ -1,0 +1,89 @@
+Voici un mail professionnel, clair et factuel, à envoyer à ton équipe Linux pour les informer du problème, de la root cause, et de la solution retenue (script shutdown + correction des montages bloqués).
+
+Je te fais une version parfaite pour un contexte bancaire/production.
+
+
+---
+
+📧 Mail à l’équipe Linux – Incident reboot RHEL7 / Filesystems bloqués
+
+Subject: RHEL7 Reboot Issue – Systemd converting reboot to shutdown (fix deployed)
+
+Hello team,
+
+During the last kernel patching on several RHEL7 servers, we observed that some VMs did not reboot automatically after the update.
+Instead of restarting, the systems powered off and required a manual start from vCenter.
+
+After full analysis of the shutdown logs, we identified the root cause:
+
+
+---
+
+ Root cause
+
+On RHEL7 (systemd-219), if certain filesystems cannot be unmounted during a reboot, systemd automatically switches from reboot.target to shutdown.target.
+This is a documented behavior on RHEL7.
+
+On the impacted servers, several application filesystems under /apps (ex: /apps/exploit, /apps/sybase, /apps/waa, etc.) were still in use during the reboot sequence (held by Splunk, Dynatrace, Trelix, ETAC, Autosys, Illumio, etc.).
+
+Because these mounts remained busy, systemd treated the reboot as unsafe and replaced it with a clean shutdown, which explains why VMware powered off the VM instead of rebooting it.
+
+This is not a VMware issue, and no kernel panic or system crash was observed.
+
+
+---
+
+🛠 Fix applied
+
+We deployed a shutdown hook script that:
+
+stops all major agents (Splunk, Dynatrace, Trelix/McAfee, Illumio, ETAC, Autosys, etc.)
+
+kills any remaining processes holding /apps
+
+ensures all application filesystems can be unmounted cleanly
+
+prevents systemd from switching to shutdown.target
+
+
+This fix applies automatically to every reboot and protects all RHEL7 servers with multiple application mounts.
+
+A “safe kernel reboot” script is also available to ensure clean reboots after kernel patches.
+
+
+---
+
+📌 Impact
+
+Reboots will now proceed normally without requiring manual action in vCenter.
+
+No application changes are required.
+
+No downtime outside of the reboot operation.
+
+
+
+---
+
+✔ Next steps
+
+We will deploy this fix across all RHEL7 servers with multiple application filesystems.
+If you identify any additional hosts exhibiting similar behavior during reboot, please inform us so we can validate the mount configuration.
+
+
+---
+
+If you have any questions or need a detailed RCA, feel free to contact me.
+
+
+
+---
+
+Si tu veux, je peux aussi te faire :
+
+✔ Une version courte pour Teams
+✔ Une version technique pour les architectes
+✔ Une version formelle RCA (Root Cause Analysis) en PDF-style
+✔ Un message pour l’équipe VMware
+
+Tu veux une autre version ?
