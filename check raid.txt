@@ -1,0 +1,131 @@
+Here’s what we can say from what’s on the screenshots.
+
+
+---
+
+1. What the error really means
+
+The log lines:
+
+Buffer I/O error on dev dm-36, logical block 0, async page read
+
+mean:
+
+dm-36 = a device-mapper device
+→ in your case: crypt-c30c4b90-5c54-409e-9665-53a531586ed4
+
+This dm-crypt device is on top of /dev/md1, which is a software RAID0 built from 4 disks /dev/sdf /dev/sdg /dev/sdh /dev/sdi (from mdadm --detail /dev/md1 in the screenshot).
+
+“Buffer I/O error … logical block 0” = the kernel tried to read sector 0 of that dm device and the read request failed. This error is propagated from the lower layer (md/RAID or the underlying disks / controller).
+
+
+So the problem is below the filesystem / LVM and above the application: somewhere in the stack
+
+/dev/sdX  →  md1 (RAID0)  →  dm-crypt (dm-36)  →  filesystem.
+
+
+---
+
+2. What we already know from the checks
+
+From the engineer’s notes:
+
+mdadm --detail /dev/md1
+
+State: clean
+
+Active devices: 4/4
+
+No failed devices.
+
+
+smartctl -a /dev/sdf /dev/sdg /dev/sdh
+
+SMART Health Status: OK
+
+Temperatures normal.
+
+
+iDRAC / BIOS: up to date.
+
+
+So there is no obvious permanent disk failure at the time of the checks, and the RAID array is not degraded.
+
+The Buffer I/O errors are also all at the same time and all on logical block 0, which strongly suggests a short, transient read error, not continuous degradation.
+
+
+---
+
+3. Most probable root cause
+
+Given the above, the most realistic explanation is:
+
+> A transient I/O read error coming from the RAID0 virtual disk (or one of its members / the HBA / backplane), propagated up to dm-36, which produced the “Buffer I/O error on dev dm-36, logical block 0” messages.
+
+The error was brief enough that mdadm did not mark any member disk as failed and SMART did not log a hard failure.
+
+
+
+Because this is RAID0 (no redundancy), any temporary issue on one of the four disks or on the controller can generate an I/O error on the whole device (dm-36), even if the array stays “clean”.
+
+Typical underlying causes for such a transient error:
+
+short communication glitch on one drive (SAS/SATA cable, backplane, HBA port),
+
+controller hiccup / firmware bug,
+
+very brief media error that was eventually re-read successfully.
+
+
+From the OS side, we only see Buffer I/O error on the mapped device; the exact component (disk vs cable vs controller) has to be confirmed on the hardware/RAID side (iDRAC logs, controller logs, vendor diagnostics).
+
+
+---
+
+4. What you can answer in the ticket (proposal)
+
+You can answer something like this (English):
+
+> From the OS side we see several Buffer I/O error on dev dm-36, logical block 0 messages.
+dm-36 corresponds to a dm-crypt device (crypt-…) built on top of /dev/md1 (software RAID0 over /dev/sdf, /dev/sdg, /dev/sdh, /dev/sdi).
+
+At the time of the checks:
+
+/dev/md1 is clean with 4/4 active devices (mdadm --detail /dev/md1),
+
+SMART for the member disks reports Health = OK,
+
+there are no current OS-level disk errors.
+
+
+This pattern is consistent with a transient read error returned by the RAID0 / storage stack (disk / cable / controller) which was short enough not to leave the array degraded, but which propagated up to the OS as a Buffer I/O error on dm-36.
+
+There is no sign of filesystem corruption at this stage, but because the volume is RAID0 (no redundancy), any new hardware issue on one of the members can immediately impact data.
+
+Request: please check the RAID controller and iDRAC logs for I/O or media errors around the timestamp of the messages, and run a full hardware/RAID diagnostic on the 4 member disks and the controller (cabling, backplane, etc.). If repeated errors are found, we recommend replacing the suspect component or migrating the data off this RAID0.
+
+
+
+
+---
+
+5. Extra checks you can still do from Linux
+
+If you want to double-check from your side:
+
+# Look for any lower-level SCSI errors around the same time
+dmesg -T | egrep 'sd[fgh]|md1|Buffer I/O error|SCSI error|resetting link'
+
+# Confirm RAID status
+cat /proc/mdstat
+mdadm --detail /dev/md1
+
+# Run extended SMART tests (outside busy production hours)
+smartctl -t long /dev/sdf
+smartctl -t long /dev/sdg
+smartctl -t long /dev/sdh
+smartctl -l error /dev/sdf
+smartctl -l error /dev/sdg
+smartctl -l error /dev/sdh
+
+If these stay clean and the error never comes back, you can classify it as a one-shot transient hardware I/O issue and keep monitoring. If it reappears, push strongly for storage vendor investigation and possibly disk/HBA replacement, especially since you’re on RAID0.
