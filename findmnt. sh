@@ -1,0 +1,18 @@
+#!/bin/bash
+
+echo "Comparaison fstab vs montages réels"
+echo "-----------------------------------"
+
+# Liste FSTAB
+fstab=$(awk '!/^#/ && NF>=2 {print $2}' /etc/fstab)
+
+# Liste montages actuels
+mounted=$(findmnt -rn -o TARGET)
+
+for fs in $fstab; do
+    if echo "$mounted" | grep -qw "$fs"; then
+        echo "[OK]  $fs est monté"
+    else
+        echo "[KO]  $fs NON monté"
+    fi
+done
